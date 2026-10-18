@@ -90,6 +90,12 @@ async function queryPage(DB: D1Database, options: { folderId?: number, pageNumbe
   return sqlResult.results
 }
 
+async function queryPageByUrl(DB: D1Database, pageUrl: string) {
+  const sql = `SELECT * FROM pages WHERE pageUrl = ? AND isDeleted = 0`
+  const result = await DB.prepare(sql).bind(pageUrl).all<Page>()
+  return result.results
+}
+
 async function selectDeletedPageTotalCount(DB: D1Database) {
   const sql = `
     SELECT COUNT(*) as count FROM pages
@@ -165,15 +171,16 @@ interface InsertPageOptions {
   contentUrl: string
   folderId: number
   screenshotId?: string
+  isShowcased: boolean
 }
 
 async function insertPage(DB: D1Database, pageOptions: InsertPageOptions) {
-  const { title, pageDesc, pageUrl, contentUrl, folderId, screenshotId = null } = pageOptions
+  const { title, pageDesc, pageUrl, contentUrl, folderId, screenshotId = null, isShowcased } = pageOptions
   const insertResult = await DB
     .prepare(
-      'INSERT INTO pages (title, pageDesc, pageUrl, contentUrl, folderId, screenshotId) VALUES (?, ?, ?, ?, ?, ?)',
+      'INSERT INTO pages (title, pageDesc, pageUrl, contentUrl, folderId, screenshotId, isShowcased) VALUES (?, ?, ?, ?, ?, ?, ?)',
     )
-    .bind(title, pageDesc, pageUrl, contentUrl, folderId, screenshotId)
+    .bind(title, pageDesc, pageUrl, contentUrl, folderId, screenshotId, isShowcased)
     .run()
   return insertResult.meta.last_row_id
 }
@@ -236,9 +243,18 @@ async function updatePage(DB: D1Database, options: UpdatePageOptions) {
   return result.every(r => r.success)
 }
 
+async function queryAllPageIds(DB: D1Database, folderId: number) {
+  const sql = `
+    SELECT id FROM pages WHERE folderId = ? AND isDeleted = 0
+  `
+  const result = await DB.prepare(sql).bind(folderId).all()
+  return result.results.map(r => r.id)
+}
+
 export {
   selectPageTotalCount,
   queryPage,
+  queryPageByUrl,
   selectDeletedPageTotalCount,
   queryDeletedPage,
   deletePageById,
@@ -249,4 +265,5 @@ export {
   queryRecentSavePage,
   selectAllPageCount,
   updatePage,
+  queryAllPageIds,
 }

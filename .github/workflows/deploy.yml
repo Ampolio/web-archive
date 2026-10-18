@@ -5,6 +5,7 @@ on:
     branches:
       - main
   repository_dispatch:
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -43,7 +44,8 @@ jobs:
 
           if [ -z "$DB_ID" ]; then
             CREATE_OUTPUT=$(wrangler d1 create web-archive)
-            DB_ID=$(echo "$CREATE_OUTPUT" | sed -n 's/.*database_id = "\([^"]*\)".*/\1/p')
+            JSON_OUTPUT=$(echo "$CREATE_OUTPUT" | sed -n '/^{/,$p')
+            DB_ID=$(echo "$JSON_OUTPUT" | jq -r '.d1_databases[0].database_id')
           else
             echo "Found existing web-archive database"
           fi
@@ -83,3 +85,4 @@ jobs:
 
 env:
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

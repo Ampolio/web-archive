@@ -1,12 +1,12 @@
 import { Hono } from 'hono'
 import { validator } from 'hono/validator'
 import { isNil, isNotNil, isNumberString } from '@web-archive/shared/utils'
+import { z } from 'zod'
 import type { HonoTypeUserInformation } from '~/constants/binding'
 import result from '~/utils/result'
-import { clearDeletedPage, deletePageById, getPageById, insertPage, queryDeletedPage, queryPage, queryRecentSavePage, restorePage, selectPageTotalCount, updatePage } from '~/model/page'
+import { clearDeletedPage, deletePageById, getPageById, insertPage, queryAllPageIds, queryDeletedPage, queryPage, queryPageByUrl, queryRecentSavePage, restorePage, selectPageTotalCount, updatePage } from '~/model/page'
 import { getFolderById, restoreFolder } from '~/model/folder'
 import { getFileFromBucket, saveFileToBucket } from '~/utils/file'
-import type { Page } from '~/sql/types'
 import { updateShowcase } from '~/model/showcase'
 import { updateBindPageByTagName } from '~/model/tag'
 
@@ -31,6 +31,10 @@ app.post(
       return c.json(result.error(400, 'FolderId id should be a number'))
     }
 
+    if (isNotNil(value.isShowcased) && !isNumberString(value.isShowcased)) {
+      return c.json(result.error(400, 'isShowcased is required'))
+    }
+
     if (isNotNil(value.bindTags)) {
       if (typeof value.bindTags !== 'string')
         return c.json(result.error(400, 'bindTags should be a string array'))
@@ -52,10 +56,11 @@ app.post(
       folderId: Number(value.folderId),
       screenshot: value.screenshot,
       bindTags: JSON.parse(value.bindTags ?? '[]') as string[],
+      isShowcased: Boolean(Number(value.isShowcased ?? 0)),
     }
   }),
   async (c) => {
-    const { title, pageDesc = '', pageUrl, pageFile, folderId, screenshot, bindTags } = c.req.valid('form')
+    const { title, pageDesc = '', pageUrl, pageFile, folderId, screenshot, bindTags, isShowcased } = c.req.valid('form')
 
     // todo check folder exists?
 
@@ -74,6 +79,7 @@ app.post(
       contentUrl,
       folderId,
       screenshotId,
+      isShowcased,
     })
     if (isNotNil(insertId)) {
       const updateTagResult = await updateBindPageByTagName(c.env.DB, bindTags.map(tagName => ({ tagName, pageIds: [insertId] })), [])
@@ -122,6 +128,57 @@ app.post(
       selectPageTotalCount(c.env.DB, { folderId, keyword, tagId }),
     ])
     return c.json(result.success({ list: pages, total }))
+  },
+)
+
+app.post(
+  '/query_all_page_ids',
+  validator('json', (value, c) => {
+    const schema = z.object({
+      folderId: z.number({
+        message: 'Folder ID should be a number',
+      }),
+    })
+
+    const parsed = schema.safeParse(value)
+    if (!parsed.success) {
+      return c.json(result.error(400, parsed.error.errors[0].message))
+    }
+
+    return parsed.data
+  }),
+  async (c) => {
+    const { folderId } = c.req.valid('json')
+    const pages = await queryAllPageIds(c.env.DB, folderId)
+
+    return c.json(result.success(pages))
+  },
+)
+
+app.post(
+  '/query_by_url',
+  validator('json', (value, c) => {
+    const errorMsg = {
+      message: 'Page URL is required',
+    }
+    const schema = z.object({
+      pageUrl: z.string(errorMsg).min(1, errorMsg),
+    })
+
+    const parsed = schema.safeParse(value)
+    if (!parsed.success) {
+      if (parsed.error.errors.length > 0) {
+        return c.json(result.error(400, parsed.error.errors[0].message))
+      }
+      return c.json(result.error(400, 'Invalid request'))
+    }
+
+    return parsed.data
+  }),
+  async (c) => {
+    const { pageUrl } = c.req.valid('json')
+    const pages = await queryPageByUrl(c.env.DB, pageUrl)
+    return c.json(result.success(pages))
   },
 )
 
@@ -292,35 +349,36 @@ app.delete(
   },
 )
 
-app.get('/content', async (c) => {
-  const pageId = c.req.query('pageId')
-  // redirect to 404
-  if (!pageId) {
-    return c.redirect('/error')
-  }
+app.get(
+  '/content',
+  validator('query', (value, c) => {
+    if (isNil(value.pageId) || !isNumberString(value.pageId)) {
+      return c.json(result.error(400, 'Page ID is required and should be a number'))
+    }
 
-  // todo refactor
-  const pageListResult = await c.env.DB.prepare('SELECT * FROM pages WHERE isDeleted = 0 AND id = ?')
-    .bind(pageId)
-    .all()
-  if (!pageListResult.success) {
-    return c.redirect('/error')
-  }
+    return {
+      pageId: Number(value.pageId),
+    }
+  }),
+  async (c) => {
+    const { pageId } = c.req.valid('query')
 
-  const page = pageListResult.results?.[0] as Page
-  if (!page) {
-    return c.redirect('/error')
-  }
+    const page = await getPageById(c.env.DB, { id: pageId, isDeleted: false })
+    if (isNil(page)) {
+      return c.json(result.error(500, 'Page not found'))
+    }
 
-  const content = await c.env.BUCKET.get(page.contentUrl)
-  if (!content) {
-    return c.redirect('/error')
-  }
+    const content = await c.env.BUCKET.get(page.contentUrl)
+    if (!content) {
+      return c.json(result.error(500, 'Page data not found'))
+    }
 
-  return c.html(
-    await content?.text(),
-  )
-})
+    c.res.headers.set('cache-control', 'private, max-age=604800')
+    return c.html(
+      await content.text(),
+    )
+  },
+)
 
 app.put(
   '/update_showcase',
@@ -363,7 +421,11 @@ app.get(
     const screenshot = await getFileFromBucket(c.env.BUCKET, id)
 
     c.res.headers.set('Content-Type', 'image/webp')
-    c.res.headers.set('cache-control', 'public, max-age=31536000')
+    c.res.headers.set('cache-control', 'private, max-age=31536000')
+
+    if (isNil(screenshot)) {
+      return c.body(null)
+    }
 
     return c.body(await screenshot.arrayBuffer())
   },
